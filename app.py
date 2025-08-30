@@ -27,11 +27,7 @@ DB_USER = os.getenv("DB_USER", "avnadmin")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_NAME = os.getenv("DB_NAME", "defaultdb")
 DB_PORT = int(os.getenv("DB_PORT", 26754))
-# DB_SSL_CA = os.getenv("DB_SSL_CA", "ca.pem")
 DB_SSL_CA = os.getenv("DB_SSL_CA", "/etc/secrets/ca.pem")  # Path to CA certificate
-
-
-
 
 # Build headers for Hugging Face
 HEADERS = {
@@ -42,34 +38,24 @@ HEADERS = {
 @retry(stop_max_attempt_number=3, wait_fixed=2000)
 def get_db_connection(use_db=True):
     try:
-        # config = {
-        #     "host": DB_HOST,
-        #     "user": DB_USER,
-        #     "password": DB_PASSWORD,
-        #     "port": DB_PORT,
-        #     "ssl_ca": DB_SSL_CA,
-        #     "ssl_verify_cert": True
-        # }
-
-          config = {
+        config = {
             "host": DB_HOST,
             "user": DB_USER,
             "password": DB_PASSWORD,
             "port": DB_PORT,
-            "database": DB_NAME if use_db else None,
             "ssl_ca": DB_SSL_CA,
             "ssl_verify_cert": True,
             "ssl_disabled": False,
-            "use_pure": True  # Try using pure Python implementation
+            "use_pure": True
         }
 
-          config.update({
-            "ssl_mode": "VERIFY_IDENTITY",
-            "ssl_verify_cert": True,
-            "ssl_ca": DB_SSL_CA
-            })
+        config.update({
+            "ssl_mode": "VERIFY_IDENTITY"
+        })
+        
         if use_db:
             config["database"] = DB_NAME
+            
         conn = mysql.connector.connect(**config)
         logger.debug("Successfully connected to MySQL")
         return conn
