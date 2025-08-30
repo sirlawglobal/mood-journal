@@ -63,32 +63,51 @@
         const resultDiv = document.getElementById('result');
         let moodChart;
 
-        // Load initial chart data with loading animation
+        // Load initial chart data
         fetchChartData();
 
         form.addEventListener('submit', async (e) => {
             e.preventDefault();
             const entry = document.getElementById('entry').value;
             resultDiv.innerText = 'Analyzing your mood... ✨';
-            const response = await fetch('/submit', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ entry })
-            });
-            const data = await response.json();
-            if (data.error) {
-                resultDiv.innerText = `Oops! ${data.error}`;
-            } else {
-                resultDiv.innerText = `Mood analyzed: You seem ${data.emotion} (confidence: ${data.score.toFixed(2)})! Entry saved! 🎉`;
+            try {
+                const response = await fetch('/submit', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ entry })
+                });
+                const data = await response.json();
+                if (data.error) {
+                    resultDiv.innerText = `Oops! ${data.error}`;
+                    return;
+                }
+
+                // Find the sentiment with the highest score
+                const dominantSentiment = data.result.reduce((prev, curr) => 
+                    curr.score > prev.score ? curr : prev
+                );
+                resultDiv.innerText = `Mood analyzed: You seem ${dominantSentiment.label.toLowerCase()} (confidence: ${(dominantSentiment.score * 100).toFixed(2)}%)! Entry saved! 🎉`;
                 fetchChartData();
+            } catch (error) {
+                resultDiv.innerText = `Oops! Something went wrong: ${error.message}`;
             }
             form.reset();
         });
 
         async function fetchChartData() {
-            const response = await fetch('/entries');
-            const data = await response.json();
-            updateChart(data.labels, data.scores);
+            try {
+                const response = await fetch('/entries');
+                const data = await response.json();
+                if (data.error) {
+                    console.error('Error fetching entries:', data.error);
+                    updateChart([], []);
+                    return;
+                }
+                updateChart(data.labels, data.scores);
+            } catch (error) {
+                console.error('Error fetching chart data:', error);
+                updateChart([], []);
+            }
         }
 
         function updateChart(labels, scores) {
@@ -97,10 +116,10 @@
             moodChart = new Chart(ctx, {
                 type: 'line',
                 data: {
-                    labels: labels || ['No data yet'],
+                    labels: labels.length ? labels : ['No data yet'],
                     datasets: [{
                         label: 'Mood Score (Positive = Happy, Negative = Sad)',
-                        data: scores || [0],
+                        data: scores.length ? scores : [0],
                         borderColor: 'rgba(255, 255, 255, 0.9)',
                         backgroundColor: 'rgba(255, 255, 255, 0.3)',
                         borderWidth: 2,
@@ -116,7 +135,12 @@
                     maintainAspectRatio: false,
                     scales: {
                         x: { title: { display: true, text: 'Time', color: 'white' }, ticks: { color: 'white' } },
-                        y: { beginAtZero: false, suggestedMin: -1, suggestedMax: 1, title: { display: true, text: 'Mood Score', color: 'white' }, ticks: { color: 'white' } }
+                        y: { 
+                            suggestedMin: -1, 
+                            suggestedMax: 1, 
+                            title: { display: true, text: 'Mood Score', color: 'white' }, 
+                            ticks: { color: 'white' } 
+                        }
                     },
                     plugins: {
                         legend: { labels: { color: 'white' } }
