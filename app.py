@@ -63,11 +63,11 @@ def get_db_connection(use_db=True):
             "use_pure": True  # Try using pure Python implementation
         }
 
-      config.update({
+          config.update({
             "ssl_mode": "VERIFY_IDENTITY",
             "ssl_verify_cert": True,
             "ssl_ca": DB_SSL_CA
-        })
+            })
         if use_db:
             config["database"] = DB_NAME
         conn = mysql.connector.connect(**config)
