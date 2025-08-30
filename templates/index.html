@@ -1,0 +1,130 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mood Journal - Unleash Your Emotions!</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body {
+            background: linear-gradient(135deg, #6b48ff, #ff4e83);
+            min-height: 100vh;
+            color: #ffffff;
+            overflow-x: hidden;
+        }
+        .fade-in {
+            animation: fadeIn 1s ease-in;
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        .slide-up {
+            animation: slideUp 0.5s ease-out;
+        }
+        @keyframes slideUp {
+            from { transform: translateY(20px); opacity: 0; }
+            to { transform: translateY(0); opacity: 1; }
+        }
+        .chart-container {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 15px;
+            padding: 20px;
+            backdrop-filter: blur(10px);
+        }
+    </style>
+</head>
+<body class="font-sans">
+    <div class="container mx-auto p-6">
+        <h1 class="text-4xl md:text-5xl font-bold text-center mb-8 text-white drop-shadow-lg animate-pulse">Mood Journal 🎉</h1>
+        <p class="text-center text-lg mb-10 text-gray-200">Track your emotions with AI magic!</p>
+
+        <div class="bg-white bg-opacity-10 rounded-xl p-6 shadow-2xl fade-in">
+            <form id="journalForm" class="space-y-4">
+                <label for="entry" class="block text-xl font-semibold text-white">Spill Your Heart Out:</label>
+                <textarea id="entry" name="entry" required class="w-full p-4 bg-white bg-opacity-20 text-white border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-purple-500 transition duration-300 hover:bg-opacity-30"></textarea>
+                <button type="submit" class="w-full bg-gradient-to-r from-purple-600 to-pink-500 text-white py-3 rounded-lg font-bold hover:from-purple-700 hover:to-pink-600 transition duration-300 shadow-lg hover:shadow-xl slide-up">Unleash Your Mood!</button>
+            </form>
+
+            <div id="result" class="mt-4 text-center text-lg font-medium slide-up"></div>
+        </div>
+
+        <div class="mt-10">
+            <h2 class="text-3xl font-bold text-center mb-6 text-white drop-shadow-md">Your Mood Journey 🌈</h2>
+            <div class="chart-container">
+                <canvas id="moodChart"></canvas>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const form = document.getElementById('journalForm');
+        const resultDiv = document.getElementById('result');
+        let moodChart;
+
+        // Load initial chart data with loading animation
+        fetchChartData();
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            const entry = document.getElementById('entry').value;
+            resultDiv.innerText = 'Analyzing your mood... ✨';
+            const response = await fetch('/submit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ entry })
+            });
+            const data = await response.json();
+            if (data.error) {
+                resultDiv.innerText = `Oops! ${data.error}`;
+            } else {
+                resultDiv.innerText = `Mood analyzed: You seem ${data.emotion} (confidence: ${data.score.toFixed(2)})! Entry saved! 🎉`;
+                fetchChartData();
+            }
+            form.reset();
+        });
+
+        async function fetchChartData() {
+            const response = await fetch('/entries');
+            const data = await response.json();
+            updateChart(data.labels, data.scores);
+        }
+
+        function updateChart(labels, scores) {
+            const ctx = document.getElementById('moodChart').getContext('2d');
+            if (moodChart) moodChart.destroy();
+            moodChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: labels || ['No data yet'],
+                    datasets: [{
+                        label: 'Mood Score (Positive = Happy, Negative = Sad)',
+                        data: scores || [0],
+                        borderColor: 'rgba(255, 255, 255, 0.9)',
+                        backgroundColor: 'rgba(255, 255, 255, 0.3)',
+                        borderWidth: 2,
+                        tension: 0.4,
+                        pointBackgroundColor: 'white',
+                        pointBorderColor: '#ff4e83',
+                        pointHoverBackgroundColor: '#6b48ff',
+                        pointHoverBorderColor: 'white'
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: { title: { display: true, text: 'Time', color: 'white' }, ticks: { color: 'white' } },
+                        y: { beginAtZero: false, suggestedMin: -1, suggestedMax: 1, title: { display: true, text: 'Mood Score', color: 'white' }, ticks: { color: 'white' } }
+                    },
+                    plugins: {
+                        legend: { labels: { color: 'white' } }
+                    },
+                    animation: { duration: 1000, easing: 'easeOutQuart' }
+                }
+            });
+        }
+    </script>
+</body>
+</html>
