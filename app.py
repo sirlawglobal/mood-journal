@@ -1,96 +1,110 @@
-#app.py
-
-
 from flask import Flask, request, jsonify, render_template
 import requests
 import mysql.connector
 import time
-from datetime import datetime
+import logging
 import os
 from dotenv import load_dotenv
 
-HF_API_TOKEN = os.getenv("HF_API_TOKEN")
+# Load environment variables from .env file
+load_dotenv()
 
 app = Flask(__name__)
 
-# MySQL configuration (update with your details)
+# Configure logging
+logging.basicConfig(level=logging.DEBUG)
+logger = logging.getLogger(__name__)
+
+# Get environment variables (for Render or local use)
+HF_API_TOKEN = os.getenv("HF_API_TOKEN")
+if not HF_API_TOKEN:
+    raise ValueError("HF_API_TOKEN environment variable not set")
+
+# MySQL configuration (update with Render database credentials or external MySQL)
 db_config = {
-    'host': 'localhost',
-    'user': 'root',  # Your MySQL username
-    'password': '',  # Your MySQL password
-    'database': 'mood_journal'
+    'host': os.getenv("DB_HOST", "localhost"),
+    'user': os.getenv("DB_USER", "root"),
+    'password': os.getenv("DB_PASSWORD", ""),
+    'database': os.getenv("DB_NAME", "mood_journal")
 }
 
-HF_API_URL = "https://api-inference.huggingface.co/models/distilbert/distilbert-base-uncased-finetuned-sst-2-english"
-
+HF_API_URL = "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english"  # Corrected URL
 
 def get_db_connection():
-    return mysql.connector.connect(**db_config)
-
+    try:
+        return mysql.connector.connect(**db_config)
+    except mysql.connector.Error as err:
+        logger.error(f"Database connection failed: {err}")
+        raise
 
 # CRUD: Create - Insert new entry
 def insert_entry(entry_text, sentiment, score):
     conn = get_db_connection()
     cursor = conn.cursor()
-    query = "INSERT INTO entries (entry_text, sentiment, score) VALUES (%s, %s, %s)"
-    cursor.execute(query, (entry_text, sentiment, score))
-    conn.commit()
-    cursor.close()
-    conn.close()
-
+    try:
+        query = "INSERT INTO entries (entry_text, sentiment, score) VALUES (%s, %s, %s)"
+        cursor.execute(query, (entry_text, sentiment, score))
+        conn.commit()
+    except mysql.connector.Error as err:
+        logger.error(f"Insert failed: {err}")
+        conn.rollback()
+        raise
+    finally:
+        cursor.close()
+        conn.close()
 
 # CRUD: Read - Get all entries for charting
 def get_all_entries():
     conn = get_db_connection()
     cursor = conn.cursor(dictionary=True)
-    query = "SELECT * FROM entries ORDER BY created_at ASC"
-    cursor.execute(query)
-    entries = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return entries
+    try:
+        query = "SELECT * FROM entries ORDER BY created_at ASC"
+        cursor.execute(query)
+        return cursor.fetchall()
+    except mysql.connector.Error as err:
+        logger.error(f"Read failed: {err}")
+        raise
+    finally:
+        cursor.close()
+        conn.close()
 
-
-# Analyze sentiment using Hugging Face API (with retries + debugging)
+# Analyze sentiment using Hugging Face API (with retries + improved debugging)
 def analyze_sentiment(text, retries=3, delay=5):
     headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
     payload = {"inputs": text}
 
     for attempt in range(retries):
-        response = requests.post(HF_API_URL, headers=headers, json=payload)
-
         try:
-            result = response.json()
-        except Exception:
-            result = response.text
+            response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=10)
+            result = response.json() if response.status_code == 200 else response.text
+            logger.debug(f"Hugging Face response (attempt {attempt+1}): Status {response.status_code}, Data {result}")
 
-        print(f"[DEBUG] Hugging Face response (attempt {attempt+1}): {result}")
-
-        if response.status_code == 200:
-            if isinstance(result, list) and len(result) > 0 and isinstance(result[0], list):
-                label = result[0][0]['label']
-                score = result[0][0]['score']
-                emotion = 'happy' if label == 'POSITIVE' else 'sad'
-                return emotion, score
+            if response.status_code == 200:
+                if isinstance(result, list) and len(result) > 0 and isinstance(result[0], list):
+                    label = result[0][0]['label']
+                    score = result[0][0]['score']
+                    emotion = 'happy' if label == 'POSITIVE' else 'sad'
+                    return emotion, score
+                else:
+                    raise ValueError(f"Unexpected response format: {result}")
+            elif response.status_code == 429:
+                logger.warning("Rate limit exceeded, retrying...")
+                time.sleep(delay)
+                continue
             else:
-                raise Exception(f"Unexpected response format: {result}")
-
-        # If model is loading, retry
-        if isinstance(result, dict) and "is currently loading" in result.get("error", "").lower():
-            print("[INFO] Model is loading... retrying in", delay, "seconds")
-            time.sleep(delay)
-            continue
-
-        # Other errors: break immediately
-        raise Exception(f"API request failed: {result}")
+                raise Exception(f"API error: {result}")
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request failed: {e}")
+            if attempt < retries - 1:
+                time.sleep(delay)
+                continue
+            raise
 
     raise Exception("API request failed after retries")
-
 
 @app.route('/')
 def index():
     return render_template('index.html')
-
 
 @app.route('/submit', methods=['POST'])
 def submit_entry():
@@ -104,18 +118,22 @@ def submit_entry():
         insert_entry(entry_text, emotion, score)
         return jsonify({'message': 'Entry saved', 'emotion': emotion, 'score': score})
     except Exception as e:
+        logger.error(f"Submission failed: {e}")
         return jsonify({'error': str(e)}), 500
-
 
 @app.route('/entries', methods=['GET'])
 def fetch_entries():
-    entries = get_all_entries()
-    chart_data = {
-        'labels': [entry['created_at'].strftime('%Y-%m-%d %H:%M') for entry in entries],
-        'scores': [entry['score'] if entry['sentiment'] == 'happy' else -entry['score'] for entry in entries]
-    }
-    return jsonify(chart_data)
-
+    try:
+        entries = get_all_entries()
+        chart_data = {
+            'labels': [entry['created_at'].strftime('%Y-%m-%d %H:%M') for entry in entries],
+            'scores': [entry['score'] if entry['sentiment'] == 'happy' else -entry['score'] for entry in entries]
+        }
+        return jsonify(chart_data)
+    except Exception as e:
+        logger.error(f"Fetch entries failed: {e}")
+        return jsonify({'error': 'Failed to fetch entries'}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True)
+    # Bind to 0.0.0.0 and Render's default port (10000)
+    app.run(host='0.0.0.0', port=int(os.getenv("PORT", 10000)), debug=True)
