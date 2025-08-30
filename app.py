@@ -22,7 +22,11 @@ if not HF_API_TOKEN:
     raise ValueError("HF_API_TOKEN environment variable not set")
 
 # Hugging Face Sentiment API
-HF_API_URL = "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english"
+# HF_API_URL = "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english"
+
+# Hugging Face Sentiment API
+HF_API_URL = "https://api-inference.huggingface.co/models/distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+
 
 # MySQL Config (Render or local DB)
 db_config = {
