@@ -18,7 +18,11 @@ app = Flask(__name__)
 HF_API_URL = "https://api-inference.huggingface.co/models/distilbert/distilbert-base-uncased-finetuned-sst-2-english"
 HF_API_KEY = os.getenv("HF_API_KEY")
 
-HEADERS = {"Authorization": f"Bearer {HF_API_KEY}"} if HF_API_KEY else {}
+# Build headers safely
+HEADERS = {
+    "Authorization": f"Bearer {HF_API_KEY}",
+    "Content-Type": "application/json"
+} if HF_API_KEY else {}
 
 
 @app.route("/")
@@ -31,20 +35,26 @@ def submit_entry():
     logger.debug("Submit entry route hit")
 
     try:
-        # entry = request.form.get("entry")
-        entry = request.form.get("entry") or request.json.get("entry") if request.is_json else None
+        # Get entry from form or JSON
+        entry = request.form.get("entry")
+        if not entry and request.is_json:
+            entry = request.json.get("entry")
 
         if not entry:
             return jsonify({"error": "No entry provided"}), 400
 
         logger.debug(f"Received entry: {entry}")
 
+        # Ensure API key is present
+        if not HF_API_KEY:
+            return jsonify({"error": "Hugging Face API key is missing. Set HF_API_KEY in .env"}), 500
+
         # Send request to Hugging Face
         response = requests.post(HF_API_URL, headers=HEADERS, json={"inputs": entry})
         logger.debug(f"Hugging Face response: {response.status_code}, {response.text}")
 
         if response.status_code != 200:
-            return jsonify({"error": f"Hugging Face API error: {response.text}"}), 500
+            return jsonify({"error": f"Hugging Face API error: {response.text}"}), response.status_code
 
         result = response.json()
 
