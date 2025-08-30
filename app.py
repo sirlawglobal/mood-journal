@@ -27,7 +27,11 @@ DB_USER = os.getenv("DB_USER", "avnadmin")
 DB_PASSWORD = os.getenv("DB_PASSWORD")
 DB_NAME = os.getenv("DB_NAME", "defaultdb")
 DB_PORT = int(os.getenv("DB_PORT", 26754))
-DB_SSL_CA = os.getenv("DB_SSL_CA", "ca.pem")  # Path to CA certificate
+# DB_SSL_CA = os.getenv("DB_SSL_CA", "ca.pem")
+DB_SSL_CA = os.getenv("DB_SSL_CA", "/etc/secrets/ca.pem")  # Path to CA certificate
+
+
+
 
 # Build headers for Hugging Face
 HEADERS = {
