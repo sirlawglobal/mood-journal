@@ -28,7 +28,8 @@ db_config = {
     'database': os.getenv("DB_NAME", "mood_journal")
 }
 
-HF_API_URL = "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english"  # Corrected URL
+# Hugging Face sentiment model
+HF_API_URL = "https://api-inference.huggingface.co/models/distilbert-base-uncased-finetuned-sst-2-english"
 
 def get_db_connection():
     try:
@@ -68,7 +69,7 @@ def get_all_entries():
         cursor.close()
         conn.close()
 
-# Analyze sentiment using Hugging Face API (with retries + improved debugging)
+# Analyze sentiment using Hugging Face API (fixed parser)
 def analyze_sentiment(text, retries=3, delay=5):
     headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
     payload = {"inputs": text}
@@ -80,10 +81,10 @@ def analyze_sentiment(text, retries=3, delay=5):
             logger.debug(f"Hugging Face response (attempt {attempt+1}): Status {response.status_code}, Data {result}")
 
             if response.status_code == 200:
-                if isinstance(result, list) and len(result) > 0 and isinstance(result[0], list):
-                    label = result[0][0]['label']
-                    score = result[0][0]['score']
-                    emotion = 'happy' if label == 'POSITIVE' else 'sad'
+                if isinstance(result, list) and len(result) > 0:
+                    label = result[0]['label']
+                    score = result[0]['score']
+                    emotion = 'happy' if label.upper() == 'POSITIVE' else 'sad'
                     return emotion, score
                 else:
                     raise ValueError(f"Unexpected response format: {result}")
