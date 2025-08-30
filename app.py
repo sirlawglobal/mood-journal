@@ -1,71 +1,65 @@
 import os
 import logging
 import requests
-from flask import Flask, render_template, request, jsonify
+from flask import Flask, request, jsonify, render_template
 from dotenv import load_dotenv
 
-# Load environment variables from .env
+# Load environment variables
 load_dotenv()
-HF_API_KEY = os.getenv("HF_API_KEY")
-
-# ✅ Use the correct Hugging Face model endpoint
-HF_API_URL = "https://api-inference.huggingface.co/models/distilbert/distilbert-base-uncased-finetuned-sst-2-english"
 
 # Configure logging
 logging.basicConfig(level=logging.DEBUG)
 logger = logging.getLogger(__name__)
 
-# Initialize Flask app
+# Flask app
 app = Flask(__name__)
+
+# Hugging Face API settings
+HF_API_URL = "https://api-inference.huggingface.co/models/distilbert/distilbert-base-uncased-finetuned-sst-2-english"
+HF_API_KEY = os.getenv("HF_API_KEY")
+
+HEADERS = {"Authorization": f"Bearer {HF_API_KEY}"} if HF_API_KEY else {}
+
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
+
 @app.route("/submit", methods=["POST"])
 def submit_entry():
     logger.debug("Submit entry route hit")
-    data = request.get_json()
-    entry_text = data.get("entry", "").strip()
-    logger.debug(f"Received entry: {entry_text}")
-
-    if not entry_text:
-        return jsonify({"error": "Entry cannot be empty"}), 400
 
     try:
-        headers = {"Authorization": f"Bearer {HF_API_KEY}"}
-        payload = {"inputs": entry_text}
+        entry = request.form.get("entry")
+        if not entry:
+            return jsonify({"error": "No entry provided"}), 400
 
-        logger.debug(f"Sending request to Hugging Face with text: {entry_text}")
-        response = requests.post(HF_API_URL, headers=headers, json=payload)
+        logger.debug(f"Received entry: {entry}")
+
+        # Send request to Hugging Face
+        response = requests.post(HF_API_URL, headers=HEADERS, json={"inputs": entry})
         logger.debug(f"Hugging Face response: {response.status_code}, {response.text}")
 
         if response.status_code != 200:
-            raise ValueError(f"API error: {response.text}")
+            return jsonify({"error": f"Hugging Face API error: {response.text}"}), 500
 
-        response_json = response.json()
+        result = response.json()
 
-        # ✅ Handle both response formats
-        if isinstance(response_json, list) and len(response_json) > 0:
-            if isinstance(response_json[0], list):  # nested list
-                predictions = response_json[0]
-            else:
-                predictions = response_json
-        else:
-            raise ValueError(f"Unexpected response format: {response_json}")
+        # Handle response format safely
+        if isinstance(result, list) and isinstance(result[0], list):
+            result = result[0]
 
-        # Pick the label with highest score
-        result = max(predictions, key=lambda x: x["score"])
-        sentiment = result["label"]
-        confidence = result["score"]
+        if not isinstance(result, list) or not all("label" in r and "score" in r for r in result):
+            raise ValueError(f"Unexpected response format: {result}")
 
-        logger.debug(f"Final sentiment: {sentiment} ({confidence:.2f})")
-        return jsonify({"sentiment": sentiment, "confidence": confidence})
+        return jsonify({"result": result})
 
     except Exception as e:
         logger.error(f"Submission failed: {e}")
         return jsonify({"error": str(e)}), 500
 
+
 if __name__ == "__main__":
-    # Debug mode for local dev
-    app.run(debug=True)
+    port = int(os.environ.get("PORT", 5000))  # Render requires dynamic port
+    app.run(host="0.0.0.0", port=port, debug=True)
