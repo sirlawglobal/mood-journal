@@ -31,7 +31,9 @@ def submit_entry():
     logger.debug("Submit entry route hit")
 
     try:
-        entry = request.form.get("entry")
+        # entry = request.form.get("entry")
+        entry = request.form.get("entry") or request.json.get("entry") if request.is_json else None
+
         if not entry:
             return jsonify({"error": "No entry provided"}), 400
 
