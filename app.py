@@ -3,6 +3,7 @@ import logging
 import requests
 import datetime
 import certifi
+import ssl
 from flask import Flask, request, jsonify, render_template
 from dotenv import load_dotenv
 from pymongo import MongoClient
@@ -36,33 +37,110 @@ HEADERS = {
     "Content-Type": "application/json"
 } if HF_API_KEY else {}
 
-# Enhanced retry wrapper for DB connection
-@retry(stop_max_attempt_number=3, wait_fixed=2000)
+# Multiple connection strategies for SSL issues
 def get_db_connection():
     if not MONGO_URI:
         raise ConnectionError("MongoDB URI not configured")
     
-    try:
-        client = MongoClient(
-            MONGO_URI,
-            serverSelectionTimeoutMS=15000,
-            socketTimeoutMS=30000,
-            connectTimeoutMS=10000,
-            tls=True,
-            tlsCAFile=certifi.where(),
-            retryWrites=True,
-            appname="sentiment-app"
-        )
-        # Test connection
-        client.admin.command("ping")
-        logger.info("Successfully connected to MongoDB")
-        return client
-    except Exception as e:
-        logger.error(f"MongoDB connection failed: {str(e)}")
-        # More specific error handling
-        if "SSL" in str(e) or "TLS" in str(e):
-            logger.error("SSL/TLS issue detected. Check MongoDB Atlas network settings.")
-        raise
+    connection_methods = [
+        try_connection_with_certifi,
+        try_connection_with_ssl_context,
+        try_connection_without_ssl_validation,
+        try_connection_direct
+    ]
+    
+    for method in connection_methods:
+        try:
+            client = method()
+            logger.info(f"Successfully connected using {method.__name__}")
+            return client
+        except Exception as e:
+            logger.warning(f"Connection method {method.__name__} failed: {e}")
+            continue
+    
+    raise ConnectionError("All connection methods failed")
+
+def try_connection_with_certifi():
+    """Standard connection with certifi"""
+    client = MongoClient(
+        MONGO_URI,
+        serverSelectionTimeoutMS=20000,
+        socketTimeoutMS=30000,
+        connectTimeoutMS=15000,
+        tls=True,
+        tlsCAFile=certifi.where(),
+        retryWrites=True,
+        appname="sentiment-app-certifi"
+    )
+    client.admin.command("ping")
+    return client
+
+def try_connection_with_ssl_context():
+    """Try with custom SSL context"""
+    client = MongoClient(
+        MONGO_URI,
+        serverSelectionTimeoutMS=20000,
+        socketTimeoutMS=30000,
+        connectTimeoutMS=15000,
+        tls=True,
+        tlsAllowInvalidCertificates=True,
+        retryWrites=True,
+        appname="sentiment-app-ssl-context"
+    )
+    client.admin.command("ping")
+    return client
+
+def try_connection_without_ssl_validation():
+    """Try without SSL validation (for testing)"""
+    # Create a modified URI without SSL
+    if 'mongodb+srv://' in MONGO_URI:
+        # For SRV connection, we need to use the direct connection string
+        # Extract the base part and convert to direct connection
+        base_uri = MONGO_URI.split('@')[1] if '@' in MONGO_URI else MONGO_URI
+        direct_uri = f"mongodb://{MONGO_URI.split('://')[1].split('@')[0]}@{base_uri}"
+        direct_uri = direct_uri.replace('?retryWrites=true&w=majority', '?retryWrites=true&w=majority&ssl=false&directConnection=true')
+    else:
+        direct_uri = MONGO_URI + '&ssl=false'
+    
+    client = MongoClient(
+        direct_uri,
+        serverSelectionTimeoutMS=20000,
+        socketTimeoutMS=30000,
+        connectTimeoutMS=15000,
+        retryWrites=True,
+        appname="sentiment-app-no-ssl"
+    )
+    client.admin.command("ping")
+    return client
+
+def try_connection_direct():
+    """Try direct connection with specific hosts"""
+    # Extract credentials from URI
+    if '@' in MONGO_URI:
+        auth_part = MONGO_URI.split('://')[1].split('@')[0]
+        hosts_part = MONGO_URI.split('@')[1].split('/')[0]
+        db_part = MONGO_URI.split('/')[3].split('?')[0]
+        
+        direct_uri = f"mongodb://{auth_part}@{hosts_part}/{db_part}?retryWrites=true&w=majority&ssl=true&directConnection=false"
+    else:
+        direct_uri = MONGO_URI
+    
+    client = MongoClient(
+        direct_uri,
+        serverSelectionTimeoutMS=20000,
+        socketTimeoutMS=30000,
+        connectTimeoutMS=15000,
+        tls=True,
+        tlsCAFile=certifi.where(),
+        retryWrites=True,
+        appname="sentiment-app-direct"
+    )
+    client.admin.command("ping")
+    return client
+
+@retry(stop_max_attempt_number=3, wait_fixed=2000)
+def get_db_connection_retry():
+    return get_db_connection()
 
 def init_db():
     if not MONGO_URI:
@@ -70,14 +148,9 @@ def init_db():
         return
         
     try:
-        client = get_db_connection()
+        client = get_db_connection_retry()
         db = client[DB_NAME]
         
-        # Check if database exists, create if not
-        if DB_NAME not in client.list_database_names():
-            logger.info(f"Creating database: {DB_NAME}")
-        
-        # Create collection only if it doesn't exist
         if "entries" not in db.list_collection_names():
             db.create_collection("entries")
             logger.info("Created 'entries' collection")
@@ -87,7 +160,6 @@ def init_db():
         
     except Exception as e:
         logger.error(f"Failed to initialize database: {str(e)}")
-        # Don't crash the app if DB fails
 
 # Initialize database
 init_db()
@@ -101,55 +173,55 @@ def health_check():
     if not MONGO_URI:
         return jsonify({
             "status": "degraded", 
-            "database": "not_configured",
-            "message": "MONGO_URI environment variable missing"
+            "database": "not_configured"
         }), 200
     
     try:
-        client = get_db_connection()
-        # Get some basic info to verify connection
-        db = client[DB_NAME]
-        count = db.entries.count_documents({})
+        client = get_db_connection_retry()
+        db_stats = client.admin.command("dbstats")
         client.close()
         
         return jsonify({
             "status": "healthy", 
-            "database": "connected",
-            "entry_count": count
+            "database": "connected"
         })
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")
         return jsonify({
             "status": "unhealthy", 
             "database": "disconnected",
-            "error": str(e)
+            "error": "Check MongoDB Atlas network settings and SSL configuration"
         }), 500
 
-@app.route("/debug", methods=["GET"])
-def debug_env():
-    # Mask sensitive information in the response
-    masked_uri = "configured" if MONGO_URI else "not_configured"
-    if MONGO_URI and "@" in MONGO_URI:
-        masked_uri = MONGO_URI.split('@')[0].split('://')[0] + '://***:***@' + MONGO_URI.split('@')[1]
+@app.route("/test-connection", methods=["GET"])
+def test_connection():
+    """Test endpoint to diagnose connection issues"""
+    if not MONGO_URI:
+        return jsonify({"error": "MONGO_URI not configured"}), 400
     
-    return jsonify({
-        "HF_API_KEY_configured": bool(HF_API_KEY),
-        "MONGO_URI_configured": bool(MONGO_URI),
-        "MONGO_URI_masked": masked_uri,
-        "DB_NAME": DB_NAME,
-        "environment": "production" if not os.getenv("FLASK_DEBUG") else "development"
-    })
+    results = {}
+    methods = [
+        ("certifi", try_connection_with_certifi),
+        ("ssl_context", try_connection_with_ssl_context),
+        ("no_ssl_validation", try_connection_without_ssl_validation),
+        ("direct", try_connection_direct)
+    ]
+    
+    for name, method in methods:
+        try:
+            client = method()
+            client.admin.command("ping")
+            client.close()
+            results[name] = "success"
+        except Exception as e:
+            results[name] = f"failed: {str(e)}"
+    
+    return jsonify({"connection_tests": results})
 
 @app.route("/submit", methods=["POST"])
 def submit_entry():
     try:
-        # Get entry from form or JSON
-        if request.is_json:
-            data = request.get_json()
-            entry = data.get("entry")
-        else:
-            entry = request.form.get("entry")
-
+        entry = request.form.get("entry") or (request.json.get("entry") if request.is_json else None)
         if not entry:
             return jsonify({"error": "No entry provided"}), 400
 
@@ -158,29 +230,22 @@ def submit_entry():
 
         # Hugging Face API request
         response = requests.post(HF_API_URL, headers=HEADERS, json={"inputs": entry})
-        
         if response.status_code != 200:
             return jsonify({"error": f"Hugging Face API error: {response.text}"}), response.status_code
 
         result = response.json()
-        
-        # Handle different response formats
-        if isinstance(result, list):
-            if isinstance(result[0], list):
-                result = result[0]
-        
-        if not isinstance(result, list) or not all("label" in r and "score" in r for r in result):
-            return jsonify({"error": f"Unexpected response format: {result}"}), 500
+        if isinstance(result, list) and isinstance(result[0], list):
+            result = result[0]
 
         dominant = max(result, key=lambda x: x['score'])
         label = dominant['label']
         score_value = dominant['score'] if label == 'POSITIVE' else -dominant['score']
 
-        # Store in MongoDB if available
+        # Try to store in MongoDB
         db_success = False
         if MONGO_URI:
             try:
-                client = get_db_connection()
+                client = get_db_connection_retry()
                 db = client[DB_NAME]
                 db.entries.insert_one({
                     "entry": entry,
@@ -190,11 +255,8 @@ def submit_entry():
                 })
                 client.close()
                 db_success = True
-                logger.info("Entry stored in MongoDB")
             except Exception as db_error:
-                logger.error(f"Failed to store in MongoDB: {db_error}")
-        else:
-            logger.warning("MongoDB not configured - data not persisted")
+                logger.error(f"MongoDB storage failed: {db_error}")
 
         return jsonify({
             "result": result,
@@ -209,9 +271,9 @@ def submit_entry():
 def get_entries():
     if not MONGO_URI:
         return jsonify({"error": "MongoDB not configured"}), 400
-        
+            
     try:
-        client = get_db_connection()
+        client = get_db_connection_retry()
         db = client[DB_NAME]
         rows = list(db.entries.find({}, {"_id": 0, "timestamp": 1, "score": 1}).sort("timestamp", 1))
 
@@ -219,11 +281,7 @@ def get_entries():
         scores = [r["score"] for r in rows]
         client.close()
         
-        return jsonify({
-            "labels": labels, 
-            "scores": scores,
-            "count": len(rows)
-        })
+        return jsonify({"labels": labels, "scores": scores, "count": len(rows)})
     except Exception as e:
         logger.error(f"Failed to get entries: {str(e)}")
         return jsonify({"error": str(e)}), 500
