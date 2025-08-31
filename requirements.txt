@@ -1,9 +1,10 @@
-flask
-requests
-mysql-connector-python
-python-dotenv
+
 flask==3.0.3
-python-dotenv==1.0.1
-mysql-connector-python==9.0.0
 requests==2.32.3
+python-dotenv==1.0.1
 retrying==1.3.4
+pymongo==4.10.1
+
+
+
+
