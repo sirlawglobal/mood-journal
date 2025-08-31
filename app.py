@@ -22,11 +22,11 @@ app = Flask(__name__)
 HF_API_URL = "https://api-inference.huggingface.co/models/distilbert/distilbert-base-uncased-finetuned-sst-2-english"
 HF_API_KEY = os.getenv("HF_API_KEY")
 
-# MongoDB connection string
-MONGO_URI = os.getenv(
-    "MONGO_URI",
-    "mongodb+srv://akanjilawrence9999_db_user:qRRt2NE0TaTuk6pE@cluster0.dpyyhxs.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-)
+# MongoDB connection string - use the exact URI from Render environment variable
+MONGO_URI = os.getenv("MONGO_URI")
+if not MONGO_URI:
+    logger.error("MONGO_URI environment variable is not set")
+    
 DB_NAME = os.getenv("DB_NAME", "sentimentDB")
 
 # Build headers for Hugging Face
@@ -39,11 +39,16 @@ HEADERS = {
 @retry(stop_max_attempt_number=3, wait_fixed=2000)
 def get_db_connection():
     try:
+        # For Render deployment, use the connection string directly
         client = MongoClient(
             MONGO_URI,
-            serverSelectionTimeoutMS=5000,
+            serverSelectionTimeoutMS=10000,  # Increased timeout
+            socketTimeoutMS=30000,
+            connectTimeoutMS=10000,
             tls=True,
-            tlsCAFile=certifi.where()  # ensure SSL certs are trusted
+            tlsCAFile=certifi.where(),  # ensure SSL certs are trusted
+            retryWrites=True,
+            appname="sentiment-app"
         )
         # Test connection
         client.admin.command("ping")
@@ -57,20 +62,24 @@ def init_db():
     try:
         client = get_db_connection()
         db = client[DB_NAME]
-        # Create collection only if it doesn’t exist
+        # Create collection only if it doesn't exist
         if "entries" not in db.list_collection_names():
             db.create_collection("entries")
         logger.debug("Database and collection 'entries' initialized successfully")
         client.close()
     except Exception as e:
         logger.error(f"Failed to initialize database: {str(e)}")
-        raise
+        # Don't raise exception here to allow app to start without DB
 
-# Initialize database
+# Initialize database (but don't crash if it fails)
 try:
-    init_db()
+    if MONGO_URI:
+        init_db()
+    else:
+        logger.warning("Skipping DB initialization - MONGO_URI not set")
 except Exception as e:
     logger.error(f"Failed to initialize database on startup: {str(e)}")
+    # Continue without DB connection
 
 @app.route("/")
 def index():
@@ -79,6 +88,9 @@ def index():
 @app.route("/health", methods=["GET"])
 def health_check():
     try:
+        if not MONGO_URI:
+            return jsonify({"status": "unhealthy", "error": "MONGO_URI not configured"}), 500
+            
         client = get_db_connection()
         client.close()
         return jsonify({"status": "healthy", "database": "connected"})
@@ -90,7 +102,7 @@ def health_check():
 def debug_env():
     return jsonify({
         "HF_API_KEY": bool(HF_API_KEY),
-        "MONGO_URI": "****" if MONGO_URI else None,
+        "MONGO_URI_configured": bool(MONGO_URI),
         "DB_NAME": DB_NAME
     })
 
@@ -130,17 +142,24 @@ def submit_entry():
 
         timestamp = datetime.datetime.now()
 
-        # Insert into MongoDB
-        client = get_db_connection()
-        db = client[DB_NAME]
-        db.entries.insert_one({
-            "entry": entry,
-            "timestamp": timestamp,
-            "label": label,
-            "score": score_value
-        })
-        client.close()
-        logger.debug("Entry inserted into MongoDB")
+        # Insert into MongoDB if connection is available
+        if MONGO_URI:
+            try:
+                client = get_db_connection()
+                db = client[DB_NAME]
+                db.entries.insert_one({
+                    "entry": entry,
+                    "timestamp": timestamp,
+                    "label": label,
+                    "score": score_value
+                })
+                client.close()
+                logger.debug("Entry inserted into MongoDB")
+            except Exception as db_error:
+                logger.error(f"Failed to insert into MongoDB: {db_error}")
+                # Continue without storing in DB
+        else:
+            logger.warning("MongoDB not configured - skipping data storage")
 
         return jsonify({"result": result})
 
@@ -151,6 +170,9 @@ def submit_entry():
 @app.route("/entries", methods=["GET"])
 def get_entries():
     try:
+        if not MONGO_URI:
+            return jsonify({"error": "MongoDB not configured"}), 500
+            
         client = get_db_connection()
         db = client[DB_NAME]
         rows = list(db.entries.find({}, {"_id": 0, "timestamp": 1, "score": 1}).sort("timestamp", 1))
@@ -166,4 +188,6 @@ def get_entries():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=True)
+    # Don't run in debug mode on Render
+    debug_mode = os.environ.get("FLASK_DEBUG", "False").lower() == "true"
+    app.run(host="0.0.0.0", port=port, debug=debug_mode)
