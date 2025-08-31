@@ -2,9 +2,9 @@ import os
 import logging
 import requests
 import datetime
-import mysql.connector
 from flask import Flask, request, jsonify, render_template
 from dotenv import load_dotenv
+from pymongo import MongoClient
 from retrying import retry
 
 # Load environment variables
@@ -21,13 +21,12 @@ app = Flask(__name__)
 HF_API_URL = "https://api-inference.huggingface.co/models/distilbert/distilbert-base-uncased-finetuned-sst-2-english"
 HF_API_KEY = os.getenv("HF_API_KEY")
 
-# MySQL database settings from environment variables
-DB_HOST = os.getenv("DB_HOST", "mysq-sirlawdev-zenkonect.d.aivencloud.com")
-DB_USER = os.getenv("DB_USER", "avnadmin")
-DB_PASSWORD = os.getenv("DB_PASSWORD")
-DB_NAME = os.getenv("DB_NAME", "defaultdb")
-DB_PORT = int(os.getenv("DB_PORT", 26754))
-DB_SSL_CA = os.getenv("DB_SSL_CA", "/etc/secrets/ca.pem")  # Path to CA certificate
+# MongoDB connection string
+MONGO_URI = os.getenv(
+    "MONGO_URI",
+    "mongodb+srv://akanjilawrence9999_db_user:qRRt2NE0TaTuk6pE@cluster0.dpyyhxs.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+)
+DB_NAME = os.getenv("DB_NAME", "sentimentDB")
 
 # Build headers for Hugging Face
 HEADERS = {
@@ -35,60 +34,28 @@ HEADERS = {
     "Content-Type": "application/json"
 } if HF_API_KEY else {}
 
+# Retry wrapper for DB connection
 @retry(stop_max_attempt_number=3, wait_fixed=2000)
-def get_db_connection(use_db=True):
+def get_db_connection():
     try:
-        config = {
-            "host": DB_HOST,
-            "user": DB_USER,
-            "password": DB_PASSWORD,
-            "port": DB_PORT,
-            "ssl_ca": DB_SSL_CA,
-            "ssl_verify_cert": True,
-            "ssl_disabled": False,
-            "use_pure": True
-        }
-
-        config.update({
-            "ssl_mode": "VERIFY_IDENTITY"
-        })
-        
-        if use_db:
-            config["database"] = DB_NAME
-            
-        conn = mysql.connector.connect(**config)
-        logger.debug("Successfully connected to MySQL")
-        return conn
-    except mysql.connector.Error as err:
-        logger.error(f"Database connection failed: errno={err.errno}, msg={err.msg}, sqlstate={err.sqlstate}")
+        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        # Test connection
+        client.admin.command("ping")
+        logger.debug("Successfully connected to MongoDB")
+        return client
+    except Exception as e:
+        logger.error(f"MongoDB connection failed: {str(e)}")
         raise
 
 def init_db():
     try:
-        # Connect without database to create it if needed
-        conn = get_db_connection(use_db=False)
-        c = conn.cursor()
-        c.execute(f"CREATE DATABASE IF NOT EXISTS {DB_NAME}")
-        conn.commit()
-        conn.close()
-
-        # Connect to the database and create table
-        conn = get_db_connection()
-        c = conn.cursor()
-        c.execute('''
-            CREATE TABLE IF NOT EXISTS entries (
-                id INT AUTO_INCREMENT PRIMARY KEY,
-                entry TEXT,
-                timestamp DATETIME,
-                label VARCHAR(255),
-                score FLOAT
-            )
-        ''')
-        conn.commit()
-        logger.debug("Database and table 'entries' initialized successfully")
-        conn.close()
-    except mysql.connector.Error as err:
-        logger.error(f"Failed to initialize database: errno={err.errno}, msg={err.msg}, sqlstate={err.sqlstate}")
+        client = get_db_connection()
+        db = client[DB_NAME]
+        db.create_collection("entries", capped=False)  # create if not exists
+        logger.debug("Database and collection 'entries' initialized successfully")
+        client.close()
+    except Exception as e:
+        logger.error(f"Failed to initialize database: {str(e)}")
         raise
 
 # Initialize database
@@ -104,8 +71,8 @@ def index():
 @app.route("/health", methods=["GET"])
 def health_check():
     try:
-        conn = get_db_connection()
-        conn.close()
+        client = get_db_connection()
+        client.close()
         return jsonify({"status": "healthy", "database": "connected"})
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")
@@ -115,12 +82,8 @@ def health_check():
 def debug_env():
     return jsonify({
         "HF_API_KEY": bool(HF_API_KEY),
-        "DB_HOST": DB_HOST,
-        "DB_USER": DB_USER,
-        "DB_PASSWORD": "****" if DB_PASSWORD else None,
-        "DB_NAME": DB_NAME,
-        "DB_PORT": DB_PORT,
-        "DB_SSL_CA": bool(DB_SSL_CA)
+        "MONGO_URI": "****" if MONGO_URI else None,
+        "DB_NAME": DB_NAME
     })
 
 @app.route("/submit", methods=["POST"])
@@ -137,8 +100,9 @@ def submit_entry():
         logger.debug(f"Received entry: {entry}")
 
         if not HF_API_KEY:
-            return jsonify({"error": "Hugging Face API key is missing. Set HF_API_KEY in environment variables"}), 500
+            return jsonify({"error": "Hugging Face API key is missing"}), 500
 
+        # Hugging Face API request
         response = requests.post(HF_API_URL, headers=HEADERS, json={"inputs": entry})
         logger.debug(f"Hugging Face response: {response.status_code}, {response.text}")
 
@@ -157,26 +121,21 @@ def submit_entry():
         score_value = dominant['score'] if label == 'POSITIVE' else -dominant['score']
 
         timestamp = datetime.datetime.now()
-        conn = get_db_connection()
-        c = conn.cursor()
-        try:
-            c.execute(
-                "INSERT INTO entries (entry, timestamp, label, score) VALUES (%s, %s, %s, %s)",
-                (entry, timestamp, label, score_value)
-            )
-            conn.commit()
-            logger.debug("Entry inserted into database")
-        except mysql.connector.Error as err:
-            logger.error(f"Database insert failed: errno={err.errno}, msg={err.msg}, sqlstate={err.sqlstate}")
-            return jsonify({"error": f"Database error: {err.msg}"}), 500
-        finally:
-            conn.close()
+
+        # Insert into MongoDB
+        client = get_db_connection()
+        db = client[DB_NAME]
+        db.entries.insert_one({
+            "entry": entry,
+            "timestamp": timestamp,
+            "label": label,
+            "score": score_value
+        })
+        client.close()
+        logger.debug("Entry inserted into MongoDB")
 
         return jsonify({"result": result})
 
-    except mysql.connector.Error as err:
-        logger.error(f"Submission failed: errno={err.errno}, msg={err.msg}, sqlstate={err.sqlstate}")
-        return jsonify({"error": f"Database error: {err.msg}"}), 500
     except Exception as e:
         logger.error(f"Submission failed: {str(e)}")
         return jsonify({"error": str(e)}), 500
@@ -184,23 +143,15 @@ def submit_entry():
 @app.route("/entries", methods=["GET"])
 def get_entries():
     try:
-        conn = get_db_connection()
-        c = conn.cursor()
-        try:
-            c.execute("SELECT timestamp, score FROM entries ORDER BY timestamp ASC")
-            rows = c.fetchall()
-            labels = [row[0].strftime("%Y-%m-%d %H:%M:%S") for row in rows]
-            scores = [row[1] for row in rows]
-            logger.debug(f"Fetched {len(rows)} entries from database")
-            return jsonify({"labels": labels, "scores": scores})
-        except mysql.connector.Error as err:
-            logger.error(f"Database query failed: errno={err.errno}, msg={err.msg}, sqlstate={err.sqlstate}")
-            return jsonify({"error": f"Database error: {err.msg}"}), 500
-        finally:
-            conn.close()
-    except mysql.connector.Error as err:
-        logger.error(f"Failed to get entries: errno={err.errno}, msg={err.msg}, sqlstate={err.sqlstate}")
-        return jsonify({"error": f"Database error: {err.msg}"}), 500
+        client = get_db_connection()
+        db = client[DB_NAME]
+        rows = list(db.entries.find({}, {"_id": 0, "timestamp": 1, "score": 1}).sort("timestamp", 1))
+
+        labels = [r["timestamp"].strftime("%Y-%m-%d %H:%M:%S") for r in rows]
+        scores = [r["score"] for r in rows]
+        logger.debug(f"Fetched {len(rows)} entries from MongoDB")
+        client.close()
+        return jsonify({"labels": labels, "scores": scores})
     except Exception as e:
         logger.error(f"Failed to get entries: {str(e)}")
         return jsonify({"error": str(e)}), 500
