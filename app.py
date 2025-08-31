@@ -2,6 +2,7 @@ import os
 import logging
 import requests
 import datetime
+import certifi
 from flask import Flask, request, jsonify, render_template
 from dotenv import load_dotenv
 from pymongo import MongoClient
@@ -38,7 +39,12 @@ HEADERS = {
 @retry(stop_max_attempt_number=3, wait_fixed=2000)
 def get_db_connection():
     try:
-        client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=5000)
+        client = MongoClient(
+            MONGO_URI,
+            serverSelectionTimeoutMS=5000,
+            tls=True,
+            tlsCAFile=certifi.where()  # ensure SSL certs are trusted
+        )
         # Test connection
         client.admin.command("ping")
         logger.debug("Successfully connected to MongoDB")
@@ -51,7 +57,9 @@ def init_db():
     try:
         client = get_db_connection()
         db = client[DB_NAME]
-        db.create_collection("entries", capped=False)  # create if not exists
+        # Create collection only if it doesn’t exist
+        if "entries" not in db.list_collection_names():
+            db.create_collection("entries")
         logger.debug("Database and collection 'entries' initialized successfully")
         client.close()
     except Exception as e:
