@@ -3,7 +3,7 @@ import logging
 import requests
 import datetime
 import certifi
-import ssl
+import socket
 from flask import Flask, request, jsonify, render_template
 from dotenv import load_dotenv
 from pymongo import MongoClient
@@ -37,110 +37,75 @@ HEADERS = {
     "Content-Type": "application/json"
 } if HF_API_KEY else {}
 
-# Multiple connection strategies for SSL issues
+# Convert SRV URI to direct connection if needed
+def get_mongo_connection_string():
+    if not MONGO_URI:
+        return None
+    
+    # If it's already a direct connection, return as is
+    if MONGO_URI.startswith('mongodb://'):
+        return MONGO_URI
+    
+    # If it's SRV connection, use it directly (pymongo handles SRV properly)
+    if MONGO_URI.startswith('mongodb+srv://'):
+        return MONGO_URI
+    
+    return None
+
+# Simple connection function for Render
+@retry(stop_max_attempt_number=3, wait_fixed=2000)
 def get_db_connection():
     if not MONGO_URI:
         raise ConnectionError("MongoDB URI not configured")
     
-    connection_methods = [
-        try_connection_with_certifi,
-        try_connection_with_ssl_context,
-        try_connection_without_ssl_validation,
-        try_connection_direct
-    ]
-    
-    for method in connection_methods:
-        try:
-            client = method()
-            logger.info(f"Successfully connected using {method.__name__}")
-            return client
-        except Exception as e:
-            logger.warning(f"Connection method {method.__name__} failed: {e}")
-            continue
-    
-    raise ConnectionError("All connection methods failed")
-
-def try_connection_with_certifi():
-    """Standard connection with certifi"""
-    client = MongoClient(
-        MONGO_URI,
-        serverSelectionTimeoutMS=20000,
-        socketTimeoutMS=30000,
-        connectTimeoutMS=15000,
-        tls=True,
-        tlsCAFile=certifi.where(),
-        retryWrites=True,
-        appname="sentiment-app-certifi"
-    )
-    client.admin.command("ping")
-    return client
-
-def try_connection_with_ssl_context():
-    """Try with custom SSL context"""
-    client = MongoClient(
-        MONGO_URI,
-        serverSelectionTimeoutMS=20000,
-        socketTimeoutMS=30000,
-        connectTimeoutMS=15000,
-        tls=True,
-        tlsAllowInvalidCertificates=True,
-        retryWrites=True,
-        appname="sentiment-app-ssl-context"
-    )
-    client.admin.command("ping")
-    return client
-
-def try_connection_without_ssl_validation():
-    """Try without SSL validation (for testing)"""
-    # Create a modified URI without SSL
-    if 'mongodb+srv://' in MONGO_URI:
-        # For SRV connection, we need to use the direct connection string
-        # Extract the base part and convert to direct connection
-        base_uri = MONGO_URI.split('@')[1] if '@' in MONGO_URI else MONGO_URI
-        direct_uri = f"mongodb://{MONGO_URI.split('://')[1].split('@')[0]}@{base_uri}"
-        direct_uri = direct_uri.replace('?retryWrites=true&w=majority', '?retryWrites=true&w=majority&ssl=false&directConnection=true')
-    else:
-        direct_uri = MONGO_URI + '&ssl=false'
-    
-    client = MongoClient(
-        direct_uri,
-        serverSelectionTimeoutMS=20000,
-        socketTimeoutMS=30000,
-        connectTimeoutMS=15000,
-        retryWrites=True,
-        appname="sentiment-app-no-ssl"
-    )
-    client.admin.command("ping")
-    return client
-
-def try_connection_direct():
-    """Try direct connection with specific hosts"""
-    # Extract credentials from URI
-    if '@' in MONGO_URI:
-        auth_part = MONGO_URI.split('://')[1].split('@')[0]
-        hosts_part = MONGO_URI.split('@')[1].split('/')[0]
-        db_part = MONGO_URI.split('/')[3].split('?')[0]
+    try:
+        # Use the original SRV connection string - pymongo handles SRV resolution
+        client = MongoClient(
+            MONGO_URI,
+            serverSelectionTimeoutMS=20000,
+            socketTimeoutMS=30000,
+            connectTimeoutMS=15000,
+            tls=True,
+            tlsCAFile=certifi.where(),
+            retryWrites=True,
+            appname="sentiment-app-render",
+            connect=False  # Don't connect immediately
+        )
         
-        direct_uri = f"mongodb://{auth_part}@{hosts_part}/{db_part}?retryWrites=true&w=majority&ssl=true&directConnection=false"
-    else:
-        direct_uri = MONGO_URI
-    
-    client = MongoClient(
-        direct_uri,
-        serverSelectionTimeoutMS=20000,
-        socketTimeoutMS=30000,
-        connectTimeoutMS=15000,
-        tls=True,
-        tlsCAFile=certifi.where(),
-        retryWrites=True,
-        appname="sentiment-app-direct"
-    )
-    client.admin.command("ping")
-    return client
-
-@retry(stop_max_attempt_number=3, wait_fixed=2000)
-def get_db_connection_retry():
-    return get_db_connection()
+        # Force connection and test
+        client.admin.command('ping')
+        logger.info("Successfully connected to MongoDB")
+        return client
+        
+    except Exception as e:
+        logger.error(f"MongoDB connection failed: {str(e)}")
+        
+        # If SRV fails, try direct connection with specific hosts
+        try:
+            logger.info("Trying direct connection...")
+            # Extract components from SRV URI
+            if MONGO_URI.startswith('mongodb+srv://'):
+                # This is the format MongoDB Atlas provides
+                # Use the exact replica set members from your error message
+                direct_uri = "mongodb://akanjilawrence9999_db_user:qRRt2NE0TaTuk6pE@ac-lwq5ipy-shard-00-00.dpyyhxs.mongodb.net:27017,ac-lwq5ipy-shard-00-01.dpyyhxs.mongodb.net:27017,ac-lwq5ipy-shard-00-02.dpyyhxs.mongodb.net:27017/sentimentDB?ssl=true&replicaSet=atlas-14b6h0-shard-0&authSource=admin&retryWrites=true&w=majority"
+                
+                client = MongoClient(
+                    direct_uri,
+                    serverSelectionTimeoutMS=20000,
+                    socketTimeoutMS=30000,
+                    connectTimeoutMS=15000,
+                    tls=True,
+                    tlsCAFile=certifi.where(),
+                    retryWrites=True,
+                    appname="sentiment-app-direct"
+                )
+                client.admin.command('ping')
+                logger.info("Successfully connected using direct connection")
+                return client
+                
+        except Exception as direct_error:
+            logger.error(f"Direct connection also failed: {direct_error}")
+            raise ConnectionError(f"All connection attempts failed: {e}, {direct_error}")
 
 def init_db():
     if not MONGO_URI:
@@ -148,7 +113,7 @@ def init_db():
         return
         
     try:
-        client = get_db_connection_retry()
+        client = get_db_connection()
         db = client[DB_NAME]
         
         if "entries" not in db.list_collection_names():
@@ -177,46 +142,31 @@ def health_check():
         }), 200
     
     try:
-        client = get_db_connection_retry()
-        db_stats = client.admin.command("dbstats")
+        client = get_db_connection()
+        db = client[DB_NAME]
+        count = db.entries.count_documents({})
         client.close()
         
         return jsonify({
             "status": "healthy", 
-            "database": "connected"
+            "database": "connected",
+            "entry_count": count
         })
     except Exception as e:
         logger.error(f"Health check failed: {str(e)}")
         return jsonify({
             "status": "unhealthy", 
             "database": "disconnected",
-            "error": "Check MongoDB Atlas network settings and SSL configuration"
+            "error": "Check MongoDB connection"
         }), 500
 
-@app.route("/test-connection", methods=["GET"])
-def test_connection():
-    """Test endpoint to diagnose connection issues"""
-    if not MONGO_URI:
-        return jsonify({"error": "MONGO_URI not configured"}), 400
-    
-    results = {}
-    methods = [
-        ("certifi", try_connection_with_certifi),
-        ("ssl_context", try_connection_with_ssl_context),
-        ("no_ssl_validation", try_connection_without_ssl_validation),
-        ("direct", try_connection_direct)
-    ]
-    
-    for name, method in methods:
-        try:
-            client = method()
-            client.admin.command("ping")
-            client.close()
-            results[name] = "success"
-        except Exception as e:
-            results[name] = f"failed: {str(e)}"
-    
-    return jsonify({"connection_tests": results})
+@app.route("/debug", methods=["GET"])
+def debug_env():
+    return jsonify({
+        "HF_API_KEY_configured": bool(HF_API_KEY),
+        "MONGO_URI_configured": bool(MONGO_URI),
+        "DB_NAME": DB_NAME
+    })
 
 @app.route("/submit", methods=["POST"])
 def submit_entry():
@@ -245,7 +195,7 @@ def submit_entry():
         db_success = False
         if MONGO_URI:
             try:
-                client = get_db_connection_retry()
+                client = get_db_connection()
                 db = client[DB_NAME]
                 db.entries.insert_one({
                     "entry": entry,
@@ -273,7 +223,7 @@ def get_entries():
         return jsonify({"error": "MongoDB not configured"}), 400
             
     try:
-        client = get_db_connection_retry()
+        client = get_db_connection()
         db = client[DB_NAME]
         rows = list(db.entries.find({}, {"_id": 0, "timestamp": 1, "score": 1}).sort("timestamp", 1))
 
@@ -285,6 +235,11 @@ def get_entries():
     except Exception as e:
         logger.error(f"Failed to get entries: {str(e)}")
         return jsonify({"error": str(e)}), 500
+
+# Simple test endpoint
+@app.route("/test", methods=["GET"])
+def test():
+    return jsonify({"status": "ok", "message": "Flask app is running"})
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
